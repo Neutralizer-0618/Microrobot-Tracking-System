@@ -47,10 +47,7 @@ def st_canvas(
         background_image_url = st._config.get_option("server.baseUrlPath") + background_image_url
         background_color = ""
 
-    initial_drawing = {"version": "4.4.0"} if initial_drawing is None else initial_drawing
-    initial_drawing["background"] = background_color
-
-    component_value = _component_func(
+    component_kwargs = dict(
         fillColor=fill_color,
         strokeWidth=stroke_width,
         strokeColor=stroke_color,
@@ -60,12 +57,17 @@ def st_canvas(
         canvasHeight=height,
         canvasWidth=width,
         drawingMode=drawing_mode,
-        initialDrawing=initial_drawing,
         displayToolbar=display_toolbar,
         displayRadius=point_display_radius,
         key=key,
         default=None,
     )
+    if initial_drawing is not None:
+        initial_drawing = dict(initial_drawing)
+        initial_drawing["background"] = background_color
+        component_kwargs["initialDrawing"] = initial_drawing
+
+    component_value = _component_func(**component_kwargs)
     if component_value is None:
         return CanvasResult()
 
