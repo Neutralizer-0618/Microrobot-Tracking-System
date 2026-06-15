@@ -9,9 +9,10 @@ import pandas as pd
 
 from micromotor_tracker.core.analysis import compute_msd
 from micromotor_tracker.core.visualization import (
+    build_speed_distribution_table,
+    save_motility_ratio_plot,
     save_msd_plot,
-    save_speed_histogram,
-    save_speed_time_plot,
+    save_speed_distribution_plot,
     save_trajectory_overlay,
     write_annotated_video,
 )
@@ -39,6 +40,11 @@ def export_results(
     speed_table: pd.DataFrame,
     roi_box: Optional[tuple[int, int, int, int]],
     output_dir: str,
+    frame_start: int = 0,
+    frame_end: Optional[int] = None,
+    speed_bin_min_um_s: float = 0.0,
+    speed_bin_max_um_s: float = 50.0,
+    speed_bin_width_um_s: float = 10.0,
 ) -> Dict[str, Optional[str]]:
     target_dir = create_output_dir(output_dir, video_source.metadata.source_name)
     detections_path = target_dir / "per_frame_detections.csv"
@@ -49,23 +55,40 @@ def export_results(
     annotated_video_path = target_dir / "annotated_tracking_video.mp4"
     overlay_path = target_dir / "trajectory_overlay.png"
     histogram_path = target_dir / "speed_histogram.png"
-    speed_time_path = target_dir / "per_track_speed_vs_time.png"
+    motility_ratio_path = target_dir / "motility_ratio.png"
     msd_plot_path = target_dir / "msd_plot.png"
 
     detections.to_csv(detections_path, index=False)
     track_stats.to_csv(track_stats_path, index=False)
     population_summary.to_csv(population_path, index=False)
-    speed_table.to_csv(target_dir / "per_track_speed_timeseries.csv", index=False)
+    speed_table.to_csv(target_dir / "per_window_speed_statistics.csv", index=False)
     with calibration_path.open("w", encoding="utf-8") as handle:
         json.dump(calibration_metadata, handle, indent=2)
     with parameters_path.open("w", encoding="utf-8") as handle:
         json.dump(analysis_parameters, handle, indent=2)
 
-    base_frame = video_source.get_frame(0)
-    write_annotated_video(video_source, track_rows, str(annotated_video_path), fps=fps, roi_box=roi_box)
+    base_frame = video_source.get_frame(frame_start)
+    write_annotated_video(
+        video_source,
+        track_rows,
+        str(annotated_video_path),
+        fps=fps,
+        roi_box=roi_box,
+        frame_start=frame_start,
+        frame_end=frame_end,
+    )
     save_trajectory_overlay(base_frame, track_rows, str(overlay_path))
-    save_speed_histogram(track_stats, str(histogram_path))
-    save_speed_time_plot(speed_table, str(speed_time_path))
+    speed_distribution = build_speed_distribution_table(
+        speed_table,
+        speed_min=speed_bin_min_um_s,
+        speed_max=speed_bin_max_um_s,
+        bin_width=speed_bin_width_um_s,
+    )
+    speed_distribution.to_csv(target_dir / "speed_distribution_table.csv", index=False)
+    save_speed_distribution_plot(speed_distribution, str(histogram_path))
+    motile_measurements = int(population_summary.loc[0, "motile_measurements"]) if not population_summary.empty else 0
+    total_measurements = int(population_summary.loc[0, "total_speed_measurements"]) if not population_summary.empty else 0
+    save_motility_ratio_plot(motile_measurements, total_measurements, str(motility_ratio_path))
 
     msd_path = None
     msd_table = compute_msd(track_rows, fps=fps, micron_per_pixel=micron_per_pixel)
@@ -83,6 +106,6 @@ def export_results(
         "annotated_tracking_video_mp4": str(annotated_video_path),
         "trajectory_overlay_png": str(overlay_path),
         "speed_histogram_png": str(histogram_path),
-        "per_track_speed_vs_time_png": str(speed_time_path),
+        "motility_ratio_png": str(motility_ratio_path),
         "msd_plot_png": msd_path,
     }

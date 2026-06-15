@@ -19,12 +19,13 @@ class AnalysisTests(unittest.TestCase):
             track_rows=track_rows,
             fps=1.0,
             micron_per_pixel=2.0,
-            analysis_config=AnalysisConfig(active_speed_threshold_um_s=5.0, min_active_duration_s=1.0),
+            analysis_config=AnalysisConfig(active_speed_threshold_um_s=5.0, min_active_duration_s=1.0, speed_window_frames=2),
         )
         self.assertEqual(len(stats), 1)
         self.assertEqual(round(stats.loc[0, "mean_speed_px_s"], 2), 3.33)
         self.assertEqual(round(stats.loc[0, "net_displacement_um"], 2), 20.0)
-        self.assertEqual(len(speeds), 3)
+        self.assertEqual(len(speeds), 1)
+        self.assertEqual(round(speeds.loc[0, "speed_um_s"], 2), 10.0)
         self.assertEqual(population.loc[0, "valid_tracks"], 1)
 
 

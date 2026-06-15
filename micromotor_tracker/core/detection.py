@@ -151,13 +151,24 @@ def run_detection(
     classifier: Optional[InteractiveClassifier] = None,
     roi_box: Optional[tuple[int, int, int, int]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    frame_start: int = 0,
+    frame_end: Optional[int] = None,
 ) -> pd.DataFrame:
     rows: List[Dict[str, float]] = []
-    total = video_source.metadata.frame_count
+    total_frames = video_source.metadata.frame_count
+    start = max(0, int(frame_start))
+    end = total_frames - 1 if frame_end is None else min(int(frame_end), total_frames - 1)
+    if end < start:
+        return pd.DataFrame()
+    total = end - start + 1
     for index, frame in enumerate(video_source.iter_frames()):
+        if index < start:
+            continue
+        if index > end:
+            break
         rows.extend(detect_objects_in_frame(frame, index, config, classifier=classifier, roi_box=roi_box))
         if progress_callback:
-            progress_callback(index + 1, total)
+            progress_callback(index - start + 1, total)
     if not rows:
         columns = [
             "frame",
@@ -184,4 +195,3 @@ def run_detection(
     detections = pd.DataFrame(rows).sort_values(["frame", "confidence"], ascending=[True, False]).reset_index(drop=True)
     detections["detection_id"] = np.arange(1, len(detections) + 1)
     return detections
-

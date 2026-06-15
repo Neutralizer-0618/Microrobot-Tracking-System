@@ -14,7 +14,13 @@ from micromotor_tracker.core.detection import run_detection
 from micromotor_tracker.core.export import export_results
 from micromotor_tracker.core.tracking import run_tracking
 from micromotor_tracker.core.video_io import load_video_source, save_uploaded_file
-from micromotor_tracker.core.visualization import draw_detection_overlay, draw_track_overlay
+from micromotor_tracker.core.visualization import (
+    build_speed_distribution_table,
+    create_motility_ratio_figure,
+    create_speed_distribution_figure,
+    draw_detection_overlay,
+    draw_track_overlay,
+)
 from micromotor_tracker.models.interactive_classifier import InteractiveClassifier
 from micromotor_tracker.utils.canvas_compat import st_canvas
 from micromotor_tracker.utils.config import (
@@ -364,6 +370,10 @@ current_positive = st.session_state["positive_boxes_by_frame"].get(frame_index, 
 current_negative = st.session_state["negative_boxes_by_frame"].get(frame_index, [])
 total_positive = sum(len(boxes) for boxes in st.session_state["positive_boxes_by_frame"].values())
 total_negative = sum(len(boxes) for boxes in st.session_state["negative_boxes_by_frame"].values())
+detections = st.session_state["detections"]
+track_rows = st.session_state["track_rows"]
+track_stats = st.session_state["track_stats"]
+population_summary = st.session_state["population_summary"]
 
 panel = st.container(border=True)
 with panel:
@@ -517,11 +527,26 @@ with panel:
         status_cols[3].metric("Negative Boxes", total_negative)
 
         if st.session_state["classifier_summary"] is not None:
-            st.json(st.session_state["classifier_summary"])
-            st.caption(
-                "Recommended ML choice here: Random Forest on handcrafted morphology, intensity, and texture features. "
-                "It fits small local microscopy annotations better than a heavy deep-learning model for this first version."
+            with st.expander("Classifier summary", expanded=False):
+                st.json(st.session_state["classifier_summary"])
+
+        st.subheader("Analysis frame range")
+        range_cols = st.columns(3)
+        analysis_frame_start = int(
+            range_cols[0].number_input("Start frame", min_value=0, max_value=max(metadata.frame_count - 1, 0), value=0, step=1)
+        )
+        analysis_frame_end = int(
+            range_cols[1].number_input(
+                "End frame",
+                min_value=analysis_frame_start,
+                max_value=max(metadata.frame_count - 1, analysis_frame_start),
+                value=max(metadata.frame_count - 1, analysis_frame_start),
+                step=1,
             )
+        )
+        range_cols[2].caption(
+            f"Only frames {analysis_frame_start} to {analysis_frame_end} will be used for detection, tracking, speed analysis, and export."
+        )
 
         st.subheader("Configure detection parameters")
         det_cols = st.columns(4)
@@ -572,6 +597,8 @@ with panel:
                     classifier=st.session_state["classifier"],
                     roi_box=st.session_state["roi_box"],
                     progress_callback=update_progress,
+                    frame_start=analysis_frame_start,
+                    frame_end=analysis_frame_end,
                 )
                 st.session_state["detections"] = detections
                 st.session_state["track_rows"] = pd.DataFrame()
@@ -588,12 +615,13 @@ with panel:
         detections = st.session_state["detections"]
         if not detections.empty:
             frame_detections = detections[detections["frame"] == frame_index]
-            st.image(
-                cv2.cvtColor(draw_detection_overlay(frame, frame_detections, roi_box=st.session_state["roi_box"]), cv2.COLOR_BGR2RGB),
-                caption="Detection overlay",
-                use_container_width=True,
-            )
-            st.dataframe(frame_detections.head(50), use_container_width=True)
+            with st.expander("Detection review", expanded=False):
+                st.image(
+                    cv2.cvtColor(draw_detection_overlay(frame, frame_detections, roi_box=st.session_state["roi_box"]), cv2.COLOR_BGR2RGB),
+                    caption="Detection overlay",
+                    use_container_width=True,
+                )
+                st.dataframe(frame_detections.head(50), use_container_width=True)
 
         st.subheader("Run tracking")
         track_cols = st.columns(4)
@@ -612,18 +640,26 @@ with panel:
         )
 
         analysis_cols = st.columns(4)
-        active_mode = analysis_cols[0].selectbox("Active motion mode", ["mean_speed", "net_displacement_rate"])
-        active_speed_threshold_um_s = analysis_cols[1].number_input("Active speed threshold (um/s)", min_value=0.0, value=5.0, step=0.1)
-        active_min_duration = analysis_cols[2].number_input("Min active duration (s)", min_value=0.0, value=1.0, step=0.1)
-        active_net_threshold = analysis_cols[3].number_input(
-            "Net displacement rate threshold (um/s)", min_value=0.0, value=5.0, step=0.1
+        speed_window_frames = int(analysis_cols[0].number_input("Speed window (frames)", min_value=2, value=20, step=1))
+        motility_speed_threshold = analysis_cols[1].number_input("Motility threshold (um/s)", min_value=0.0, value=10.0, step=0.1)
+        speed_bin_min = float(analysis_cols[2].number_input("Speed bin lower (um/s)", value=0.0, step=1.0))
+        speed_bin_width = float(analysis_cols[3].number_input("Speed bin width (um/s)", min_value=0.1, value=10.0, step=1.0))
+        analysis_cols2 = st.columns(2)
+        speed_bin_max = float(analysis_cols2[0].number_input("Speed bin upper (um/s)", min_value=speed_bin_min + speed_bin_width, value=50.0, step=1.0))
+        analysis_cols2[1].caption(
+            "Speed is now measured in non-overlapping frame windows. By default, each 20-frame segment contributes one speed value; leftover segments shorter than the window are ignored."
         )
 
         analysis_config = AnalysisConfig(
-            active_speed_threshold_um_s=active_speed_threshold_um_s,
-            min_active_duration_s=active_min_duration,
-            active_mode=active_mode,
-            active_net_displacement_threshold_um_s=active_net_threshold,
+            active_speed_threshold_um_s=motility_speed_threshold,
+            min_active_duration_s=0.0,
+            active_mode="mean_speed",
+            active_net_displacement_threshold_um_s=motility_speed_threshold,
+            speed_window_frames=speed_window_frames,
+            speed_bin_min_um_s=speed_bin_min,
+            speed_bin_max_um_s=speed_bin_max,
+            speed_bin_width_um_s=speed_bin_width,
+            motility_speed_threshold_um_s=motility_speed_threshold,
         )
 
         if st.button("Run tracking and motility analysis"):
@@ -646,23 +682,50 @@ with panel:
                     st.session_state["track_stats"] = track_stats
                     st.session_state["speed_table"] = speed_table
                     st.session_state["population_summary"] = population_summary
-                    st.success(f"Tracking complete: {track_stats['track_id'].nunique() if not track_stats.empty else 0} valid tracks.")
+                    st.success(
+                        f"Tracking complete: {track_stats['track_id'].nunique() if not track_stats.empty else 0} valid tracks, "
+                        f"{len(speed_table)} valid speed measurements."
+                    )
                 except Exception as exc:
                     st.error(f"Tracking failed: {exc}")
 
-        st.subheader("Review tracks")
         track_rows = st.session_state["track_rows"]
         track_stats = st.session_state["track_stats"]
         population_summary = st.session_state["population_summary"]
 
+        st.subheader("Results")
         if not track_rows.empty:
-            st.image(
-                cv2.cvtColor(draw_track_overlay(frame, track_rows, frame_index, roi_box=st.session_state["roi_box"]), cv2.COLOR_BGR2RGB),
-                caption="Track overlay",
-                use_container_width=True,
+            speed_distribution = build_speed_distribution_table(
+                st.session_state["speed_table"],
+                speed_min=analysis_config.speed_bin_min_um_s,
+                speed_max=analysis_config.speed_bin_max_um_s,
+                bin_width=analysis_config.speed_bin_width_um_s,
             )
-            st.dataframe(track_stats, use_container_width=True)
-            st.dataframe(population_summary, use_container_width=True)
+            motile_measurements = int(population_summary.loc[0, "motile_measurements"]) if not population_summary.empty else 0
+            total_measurements = int(population_summary.loc[0, "total_speed_measurements"]) if not population_summary.empty else 0
+            mean_speed = float(population_summary.loc[0, "mean_speed_um_s"]) if not population_summary.empty else float("nan")
+            speed_variance = float(population_summary.loc[0, "speed_variance_um_s"]) if not population_summary.empty else float("nan")
+
+            summary_cols = st.columns(3)
+            summary_cols[0].metric("Speed measurements", total_measurements)
+            summary_cols[1].metric("Motility ratio (%)", f"{population_summary.loc[0, 'motility_ratio_pct']:.2f}" if not population_summary.empty and pd.notna(population_summary.loc[0, "motility_ratio_pct"]) else "N/A")
+            summary_cols[2].metric("Mean speed ± variance (um/s)", f"{mean_speed:.2f} ± {speed_variance:.2f}" if pd.notna(mean_speed) and pd.notna(speed_variance) else "N/A")
+
+            chart_cols = st.columns(2)
+            with chart_cols[0]:
+                st.pyplot(create_speed_distribution_figure(speed_distribution), use_container_width=True)
+            with chart_cols[1]:
+                st.pyplot(create_motility_ratio_figure(motile_measurements, total_measurements), use_container_width=True)
+
+            with st.expander("Track overlay and detailed tables", expanded=False):
+                st.image(
+                    cv2.cvtColor(draw_track_overlay(frame, track_rows, frame_index, roi_box=st.session_state["roi_box"]), cv2.COLOR_BGR2RGB),
+                    caption="Track overlay",
+                    use_container_width=True,
+                )
+                st.dataframe(track_stats, use_container_width=True)
+                st.dataframe(st.session_state["speed_table"], use_container_width=True)
+                st.dataframe(population_summary, use_container_width=True)
         else:
             st.info("No tracks available yet.")
 
@@ -712,6 +775,11 @@ with panel:
                         speed_table=st.session_state["speed_table"],
                         roi_box=st.session_state["roi_box"],
                         output_dir=output_dir,
+                        frame_start=analysis_frame_start,
+                        frame_end=analysis_frame_end,
+                        speed_bin_min_um_s=analysis_config.speed_bin_min_um_s,
+                        speed_bin_max_um_s=analysis_config.speed_bin_max_um_s,
+                        speed_bin_width_um_s=analysis_config.speed_bin_width_um_s,
                     )
                     st.session_state["export_paths"] = export_paths
                     st.success(f"Results exported to {export_paths['output_dir']}")
@@ -719,4 +787,5 @@ with panel:
                     st.error(f"Export failed: {exc}")
 
 if st.session_state["export_paths"] is not None:
-    st.json(st.session_state["export_paths"])
+    with st.expander("Exported file paths", expanded=False):
+        st.json(st.session_state["export_paths"])

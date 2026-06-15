@@ -48,6 +48,11 @@ class AnalysisConfig:
     min_active_duration_s: float = 1.0
     active_mode: str = "mean_speed"
     active_net_displacement_threshold_um_s: float = 5.0
+    speed_window_frames: int = 20
+    speed_bin_min_um_s: float = 0.0
+    speed_bin_max_um_s: float = 50.0
+    speed_bin_width_um_s: float = 10.0
+    motility_speed_threshold_um_s: float = 10.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -80,4 +85,3 @@ def serialize_parameters(
     if extra:
         payload["extra"] = extra
     return payload
-

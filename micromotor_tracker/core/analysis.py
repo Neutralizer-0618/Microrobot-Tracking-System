@@ -21,7 +21,8 @@ def compute_track_statistics(
         raise ValueError("FPS must be greater than zero for motility analysis.")
 
     per_track = []
-    speed_rows = []
+    window_rows = []
+    window_size = max(2, int(analysis_config.speed_window_frames))
     for track_id, group in track_rows.sort_values(["track_id", "frame"]).groupby("track_id"):
         group = group.reset_index(drop=True)
         dx = group["x"].diff()
@@ -85,58 +86,95 @@ def compute_track_statistics(
                 "low_confidence_track": bool(group["low_confidence_track"].iloc[0]) if "low_confidence_track" in group else False,
                 "mean_track_confidence": float(group["mean_track_confidence"].iloc[0]) if "mean_track_confidence" in group else np.nan,
                 "interpolated_fraction": float(group["interpolated_fraction"].iloc[0]) if "interpolated_fraction" in group else 0.0,
-                "active_motion": active,
-                "active_metric_value_um_s": net_rate_um_s if analysis_config.active_mode == "net_displacement_rate" else mean_speed_um_s,
+                "track_active_motion": active,
+                "track_active_metric_value_um_s": net_rate_um_s if analysis_config.active_mode == "net_displacement_rate" else mean_speed_um_s,
             }
         )
 
-        group_speed = pd.DataFrame(
-            {
-                "track_id": track_id,
-                "frame": group["frame"],
-                "time_s": group["frame"] / fps,
-                "instantaneous_speed_px_s": speed_px_s,
-                "instantaneous_speed_um_s": speed_um_s,
-            }
-        )
-        speed_rows.append(group_speed)
+        full_windows = len(group) // window_size
+        for window_index in range(full_windows):
+            start_idx = window_index * window_size
+            end_idx = start_idx + window_size - 1
+            window = group.iloc[start_idx : end_idx + 1].reset_index(drop=True)
+            start_frame = int(window["frame"].iloc[0])
+            end_frame = int(window["frame"].iloc[-1])
+            duration_s = float((end_frame - start_frame) / fps)
+            if duration_s <= 0:
+                continue
+            net_dx = float(window["x"].iloc[-1] - window["x"].iloc[0])
+            net_dy = float(window["y"].iloc[-1] - window["y"].iloc[0])
+            net_displacement_px = float(np.sqrt(net_dx**2 + net_dy**2))
+            speed_px_s_window = net_displacement_px / duration_s
+            speed_um_s_window = speed_px_s_window * micron_per_pixel if micron_per_pixel else np.nan
+            motile = bool(np.isfinite(speed_um_s_window) and speed_um_s_window >= analysis_config.motility_speed_threshold_um_s)
+            window_rows.append(
+                {
+                    "track_id": track_id,
+                    "window_index": window_index + 1,
+                    "window_size_frames": window_size,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "duration_s": duration_s,
+                    "start_x": float(window["x"].iloc[0]),
+                    "start_y": float(window["y"].iloc[0]),
+                    "end_x": float(window["x"].iloc[-1]),
+                    "end_y": float(window["y"].iloc[-1]),
+                    "net_displacement_px": net_displacement_px,
+                    "net_displacement_um": net_displacement_px * micron_per_pixel if micron_per_pixel else np.nan,
+                    "speed_px_s": speed_px_s_window,
+                    "speed_um_s": speed_um_s_window,
+                    "motile": motile,
+                    "low_confidence_track": bool(group["low_confidence_track"].iloc[0]) if "low_confidence_track" in group else False,
+                }
+            )
 
     track_stats = pd.DataFrame(per_track).sort_values("track_id").reset_index(drop=True)
-    speed_table = pd.concat(speed_rows, ignore_index=True) if speed_rows else pd.DataFrame()
-    population = compute_population_summary(track_stats, track_rows)
+    window_stats = pd.DataFrame(window_rows).sort_values(["track_id", "window_index"]).reset_index(drop=True) if window_rows else pd.DataFrame()
+    population = compute_population_summary(track_stats, track_rows, window_stats, analysis_config)
     if track_meta is not None and not track_meta.empty:
         track_stats = track_stats.merge(track_meta, on="track_id", how="left", suffixes=("", "_meta"))
-    return track_stats, speed_table, population
+    return track_stats, window_stats, population
 
 
-def compute_population_summary(track_stats: pd.DataFrame, track_rows: pd.DataFrame) -> pd.DataFrame:
+def compute_population_summary(
+    track_stats: pd.DataFrame,
+    track_rows: pd.DataFrame,
+    window_stats: pd.DataFrame,
+    analysis_config: AnalysisConfig,
+) -> pd.DataFrame:
     if track_stats.empty:
         return pd.DataFrame(
             [
                 {
                     "total_detections": 0,
                     "valid_tracks": 0,
+                    "total_speed_measurements": 0,
+                    "motile_measurements": 0,
+                    "motility_ratio_pct": np.nan,
                     "mean_speed_um_s": np.nan,
                     "median_speed_um_s": np.nan,
-                    "speed_std_um_s": np.nan,
-                    "moving_fraction": np.nan,
-                    "inactive_fraction": np.nan,
+                    "speed_variance_um_s": np.nan,
+                    "motility_speed_threshold_um_s": analysis_config.motility_speed_threshold_um_s,
                 }
             ]
         )
-    moving_fraction = float(track_stats["active_motion"].mean())
-    inactive_fraction = 1.0 - moving_fraction
+    valid_window_speeds = window_stats["speed_um_s"].dropna() if not window_stats.empty else pd.Series(dtype=float)
+    motile_measurements = int(window_stats["motile"].sum()) if not window_stats.empty and "motile" in window_stats else 0
+    total_measurements = int(len(window_stats))
+    motility_ratio_pct = float((motile_measurements / total_measurements) * 100.0) if total_measurements > 0 else np.nan
     return pd.DataFrame(
         [
             {
                 "total_detections": int(len(track_rows)),
                 "valid_tracks": int(track_stats["track_id"].nunique()),
-                "mean_speed_um_s": float(track_stats["mean_speed_um_s"].mean()),
-                "median_speed_um_s": float(track_stats["median_speed_um_s"].median()),
-                "speed_std_um_s": float(track_stats["mean_speed_um_s"].std(ddof=0)),
-                "moving_fraction": moving_fraction,
-                "inactive_fraction": inactive_fraction,
+                "total_speed_measurements": total_measurements,
+                "motile_measurements": motile_measurements,
+                "motility_ratio_pct": motility_ratio_pct,
+                "mean_speed_um_s": float(valid_window_speeds.mean()) if not valid_window_speeds.empty else np.nan,
+                "median_speed_um_s": float(valid_window_speeds.median()) if not valid_window_speeds.empty else np.nan,
+                "speed_variance_um_s": float(valid_window_speeds.var(ddof=0)) if not valid_window_speeds.empty else np.nan,
                 "low_confidence_tracks": int(track_stats["low_confidence_track"].sum()),
+                "motility_speed_threshold_um_s": analysis_config.motility_speed_threshold_um_s,
             }
         ]
     )
@@ -162,4 +200,3 @@ def compute_msd(track_rows: pd.DataFrame, fps: float, micron_per_pixel: Optional
     return (
         msd_table.groupby(["lag_frames", "lag_time_s"], as_index=False)["msd"].mean().sort_values("lag_frames").reset_index(drop=True)
     )
-
