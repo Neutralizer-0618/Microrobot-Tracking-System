@@ -180,6 +180,45 @@ def compute_population_summary(
     )
 
 
+def filter_results_by_mean_speed(
+    track_stats: pd.DataFrame,
+    track_rows: pd.DataFrame,
+    speed_table: pd.DataFrame,
+    min_mean_speed_um_s: float,
+    max_mean_speed_um_s: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if track_stats.empty:
+        return track_stats.copy(), track_rows.copy(), speed_table.copy()
+
+    filtered_track_stats = (
+        track_stats[track_stats["mean_speed_um_s"].between(min_mean_speed_um_s, max_mean_speed_um_s, inclusive="both")]
+        .copy()
+        .reset_index(drop=True)
+    )
+    if filtered_track_stats.empty:
+        return (
+            filtered_track_stats,
+            track_rows.iloc[0:0].copy(),
+            speed_table.iloc[0:0].copy(),
+        )
+
+    track_ids = filtered_track_stats["track_id"].tolist()
+    filtered_track_rows = (
+        track_rows[track_rows["track_id"].isin(track_ids)].copy().sort_values(["track_id", "frame"]).reset_index(drop=True)
+        if not track_rows.empty
+        else track_rows.copy()
+    )
+    filtered_speed_table = (
+        speed_table[speed_table["track_id"].isin(track_ids)]
+        .copy()
+        .sort_values(["track_id", "window_index"])
+        .reset_index(drop=True)
+        if not speed_table.empty
+        else speed_table.copy()
+    )
+    return filtered_track_stats, filtered_track_rows, filtered_speed_table
+
+
 def compute_msd(track_rows: pd.DataFrame, fps: float, micron_per_pixel: Optional[float]) -> pd.DataFrame:
     if track_rows.empty or fps <= 0:
         return pd.DataFrame()

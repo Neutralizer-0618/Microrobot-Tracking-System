@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-from micromotor_tracker.core.analysis import compute_track_statistics
+from micromotor_tracker.core.analysis import compute_population_summary, compute_track_statistics, filter_results_by_mean_speed
 from micromotor_tracker.core.calibration import compute_calibration
 from micromotor_tracker.core.detection import run_detection
 from micromotor_tracker.core.export import export_results
@@ -716,6 +716,73 @@ with panel:
                 st.pyplot(create_speed_distribution_figure(speed_distribution), use_container_width=True)
             with chart_cols[1]:
                 st.pyplot(create_motility_ratio_figure(motile_measurements, total_measurements), use_container_width=True)
+
+            st.subheader("Filter By Mean Velocity")
+            if "mean_speed_um_s" not in track_stats or track_stats["mean_speed_um_s"].dropna().empty:
+                st.info("Mean velocity filtering is available after calibration provides speeds in um/s.")
+            else:
+                mean_speed_series = track_stats["mean_speed_um_s"].dropna()
+                default_filter_min = float(mean_speed_series.min())
+                default_filter_max = float(mean_speed_series.max())
+                filter_cols = st.columns(3)
+                mean_velocity_filter_min = float(
+                    filter_cols[0].number_input(
+                        "Mean velocity min (um/s)",
+                        min_value=default_filter_min,
+                        max_value=default_filter_max,
+                        value=default_filter_min,
+                        step=0.1,
+                    )
+                )
+                mean_velocity_filter_max = float(
+                    filter_cols[1].number_input(
+                        "Mean velocity max (um/s)",
+                        min_value=mean_velocity_filter_min,
+                        max_value=default_filter_max,
+                        value=default_filter_max,
+                        step=0.1,
+                    )
+                )
+                filter_cols[2].caption(
+                    f"Showing tracks whose mean velocity falls between {mean_velocity_filter_min:.2f} and {mean_velocity_filter_max:.2f} um/s."
+                )
+
+                filtered_track_stats, filtered_track_rows, filtered_speed_table = filter_results_by_mean_speed(
+                    track_stats,
+                    track_rows,
+                    st.session_state["speed_table"],
+                    min_mean_speed_um_s=mean_velocity_filter_min,
+                    max_mean_speed_um_s=mean_velocity_filter_max,
+                )
+                filtered_population_summary = compute_population_summary(
+                    filtered_track_stats,
+                    filtered_track_rows,
+                    filtered_speed_table,
+                    analysis_config,
+                )
+
+                if filtered_track_stats.empty:
+                    st.warning("No tracks fall within the selected mean velocity range.")
+                else:
+                    filtered_summary_cols = st.columns(3)
+                    filtered_summary_cols[0].metric("Filtered tracks", int(filtered_track_stats["track_id"].nunique()))
+                    filtered_summary_cols[1].metric("Filtered speed measurements", int(len(filtered_speed_table)))
+                    filtered_summary_cols[2].metric(
+                        "Filtered mean speed (um/s)",
+                        f"{filtered_population_summary.loc[0, 'mean_speed_um_s']:.2f}"
+                        if not filtered_population_summary.empty and pd.notna(filtered_population_summary.loc[0, "mean_speed_um_s"])
+                        else "N/A",
+                    )
+
+                    with st.expander("Filtered mean velocity results", expanded=False):
+                        st.image(
+                            cv2.cvtColor(draw_track_overlay(frame, filtered_track_rows, frame_index, roi_box=st.session_state["roi_box"]), cv2.COLOR_BGR2RGB),
+                            caption="Filtered track overlay",
+                            use_container_width=True,
+                        )
+                        st.dataframe(filtered_track_stats, use_container_width=True)
+                        st.dataframe(filtered_speed_table, use_container_width=True)
+                        st.dataframe(filtered_population_summary, use_container_width=True)
 
             with st.expander("Track overlay and detailed tables", expanded=False):
                 st.image(
